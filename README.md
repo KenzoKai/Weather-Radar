@@ -4,9 +4,9 @@ A sophisticated web application that displays NEXRAD weather radar data with adv
 
 <img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad1.png?raw=true" alt="KenzoRadar" width="100%">
 <p>
-<img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad2.png?raw=true" alt="KenzoRadar" width="260" hspace="10">
-<img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad3.png?raw=true" alt="KenzoRadar" width="260" hspace="10">
-<img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad4.png?raw=true" alt="KenzoRadar" width="260" hspace="10">
+<img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad2.png?raw=true" alt="KenzoRadar" width="260" hspace="5">
+<img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad3.png?raw=true" alt="KenzoRadar" width="260" hspace="5">
+<img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad4.png?raw=true" alt="KenzoRadar" width="260" hspace="5">
 </p>
 ## Features
 
