@@ -1,0 +1,5 @@
+flask==2.3.3
+boto3==1.28.85
+numpy==1.24.3
+pyart==1.15.0
+matplotlib==3.7.2

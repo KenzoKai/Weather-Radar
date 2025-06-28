@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Weather Radar - {{ site }}</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Custom CSS -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div id="map"></div>
+    
+    <div class="control-panel">
+        <h3>{{ site }} Weather Radar</h3>
+        
+        <div class="control-group">
+            <label for="elevation">Elevation Angle:</label>
+            <select id="elevation">
+                <option value="0.5">0.5°</option>
+                <option value="1.5">1.5°</option>
+                <option value="2.4">2.4°</option>
+                <option value="3.4">3.4°</option>
+                <option value="4.3">4.3°</option>
+                <option value="6.0">6.0°</option>
+                <option value="9.9">9.9°</option>
+                <option value="14.0">14.0°</option>
+                <option value="19.5">19.5°</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="opacity">Radar Opacity:</label>
+            <input type="range" id="opacity" min="0.1" max="1" step="0.1" value="0.8">
+        </div>
+        
+        <div class="control-group">
+            <label for="threshold">Min dBZ Threshold:</label>
+            <select id="threshold">
+                <option value="-10">-10 dBZ (All data)</option>
+                <option value="0">0 dBZ (Filter noise)</option>
+                <option value="5">5 dBZ (Light precip+)</option>
+                <option value="10">10 dBZ (Moderate precip+)</option>
+                <option value="15">15 dBZ (Heavy precip+)</option>
+            </select>
+        </div>
+        
+        <div class="control-group">
+            <label for="density">Data Density:</label>
+            <select id="density">
+                <option value="1">Maximum (Every point)</option>
+                <option value="2" selected>High (Every 2nd point)</option>
+                <option value="3">Medium (Every 3rd point)</option>
+                <option value="4">Low (Every 4th point)</option>
+            </select>
+        </div>
+        
+        <div class="control-group auto-refresh">
+            <input type="checkbox" id="autoRefresh" checked>
+            <label for="autoRefresh">Auto-refresh (30s)</label>
+        </div>
+        
+        <button class="refresh-btn" id="refreshBtn">Refresh Data</button>
+        
+        <div class="status" id="status">Loading...</div>
+    </div>
+    
+    <div class="legend">
+        <h4>Reflectivity (dBZ)</h4>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #9C9C9C;"></div>
+            <span>-10 to 0</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #00ECEC;"></div>
+            <span>0 to 5</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #019FF4;"></div>
+            <span>5 to 10</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #0300F4;"></div>
+            <span>10 to 15</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #02FD02;"></div>
+            <span>15 to 20</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #01C501;"></div>
+            <span>20 to 25</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #008E00;"></div>
+            <span>25 to 30</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #FDF802;"></div>
+            <span>30 to 35</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #E5BC00;"></div>
+            <span>35 to 40</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #FD9500;"></div>
+            <span>40 to 45</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #FD0000;"></div>
+            <span>45 to 50</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #D40000;"></div>
+            <span>50 to 55</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #BC0000;"></div>
+            <span>55 to 60</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #FD00FD;"></div>
+            <span>60 to 65</span>
+        </div>
+        <div class="legend-item">
+            <div class="legend-color" style="background: #9854C6;"></div>
+            <span>65+</span>
+        </div>
+    </div>
+
+    <!-- Leaflet JavaScript -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <script>
+        // Configuration from server
+        const RADAR_LAT = {{ radar_lat|tojson }};
+        const RADAR_LON = {{ radar_lon|tojson }};
+        const SITE = {{ site|tojson }};
+        
+        // Initialize map
+        const map = L.map('map').setView([RADAR_LAT, RADAR_LON], 8);
+        
+        // Add base layer
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+        
+        // Add dark mode tiles for better radar visibility
+        const darkTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            attribution: '© OpenStreetMap contributors, © CARTO'
+        });
+        
+        // Layer control
+        const baseLayers = {
+            "Standard": L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }),
+            "Dark": darkTiles
+        };
+        
+        L.control.layers(baseLayers).addTo(map);
+        
+        // Set dark as default
+        map.removeLayer(map._layers[Object.keys(map._layers)[0]]);
+        darkTiles.addTo(map);
+        
+        // Add radar location marker
+        const radarMarker = L.marker([RADAR_LAT, RADAR_LON], {
+            icon: L.divIcon({
+                className: 'radar-icon',
+                html: '<div style="background: red; width: 10px; height: 10px; border-radius: 50%; border: 2px solid white;"></div>',
+                iconSize: [14, 14],
+                iconAnchor: [7, 7]
+            })
+        }).addTo(map);
+        
+        radarMarker.bindPopup(SITE + ' Radar Site');
+        
+        // Radar overlay variables
+        let radarOverlay = null;
+        let radarData = null;
+        let autoRefreshInterval = null;
+        
+        // DOM elements
+        const elevationSelect = document.getElementById('elevation');
+        const opacitySlider = document.getElementById('opacity');
+        const thresholdSelect = document.getElementById('threshold');
+        const densitySelect = document.getElementById('density');
+        const autoRefreshCheckbox = document.getElementById('autoRefresh');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const statusDiv = document.getElementById('status');
+        
+        // Update status
+        function updateStatus(message, type = 'loading') {
+            statusDiv.textContent = message;
+            statusDiv.className = `status ${type}`;
+        }
+        
+        // Load radar data
+        async function loadRadarData() {
+            try {
+                updateStatus('Loading radar data...', 'loading');
+                refreshBtn.disabled = true;
+                
+                const elevation = elevationSelect.value;
+                const threshold = thresholdSelect.value;
+                const density = densitySelect.value;
+                const response = await fetch(`/api/radar_data?elev=${elevation}&threshold=${threshold}&density=${density}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    radarData = data;
+                    updateRadarOverlay();
+                    const filterInfo = data.filter_info || {};
+                    updateStatus(`Updated: ${data.timestamp} (${data.elevation.toFixed(1)}°) - ${filterInfo.point_count || 0} points`, 'success');
+                } else {
+                    updateStatus(`Error: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                console.error('Error loading radar data:', error);
+                updateStatus(`Error: ${error.message}`, 'error');
+            } finally {
+                refreshBtn.disabled = false;
+            }
+        }
+        
+        // Update radar overlay on map using high-resolution points
+        function updateRadarOverlay() {
+            if (!radarData || !radarData.overlay_data) return;
+            
+            // Remove existing overlay
+            if (radarOverlay) {
+                map.removeLayer(radarOverlay);
+            }
+            
+            console.log(`Creating high-resolution radar overlay with ${radarData.overlay_data.length} points`);
+            
+            // Create high-density point overlay for maximum resolution
+            const points = radarData.overlay_data.map(point => {
+                return L.circleMarker([point.lat, point.lon], {
+                    radius: 2.5,  // Optimized size for coverage vs performance
+                    fillColor: point.color,
+                    color: point.color,
+                    weight: 0,
+                    opacity: parseFloat(opacitySlider.value),
+                    fillOpacity: parseFloat(opacitySlider.value)
+                }).bindTooltip(`${point.value.toFixed(1)} dBZ`, {
+                    direction: 'top',
+                    offset: [0, -5]
+                });
+            });
+            
+            radarOverlay = L.layerGroup(points).addTo(map);
+            updateStatus(`Displaying ${points.length} radar data points`, 'success');
+        }
+        
+        // Update overlay opacity
+        function updateOverlayOpacity() {
+            const opacity = parseFloat(opacitySlider.value);
+            
+            if (radarOverlay) {
+                radarOverlay.eachLayer(layer => {
+                    if (layer.setStyle) {
+                        layer.setStyle({
+                            opacity: opacity,
+                            fillOpacity: opacity
+                        });
+                    }
+                });
+            }
+        }
+        
+        // Setup auto-refresh
+        function setupAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+            }
+            
+            if (autoRefreshCheckbox.checked) {
+                autoRefreshInterval = setInterval(loadRadarData, 30000); // 30 seconds
+            }
+        }
+        
+        // Event listeners
+        elevationSelect.addEventListener('change', loadRadarData);
+        thresholdSelect.addEventListener('change', loadRadarData);
+        densitySelect.addEventListener('change', loadRadarData);
+        opacitySlider.addEventListener('input', updateOverlayOpacity);
+        autoRefreshCheckbox.addEventListener('change', setupAutoRefresh);
+        refreshBtn.addEventListener('click', loadRadarData);
+        
+        // Initial load
+        loadRadarData();
+        setupAutoRefresh();
+    </script>
+</body>
+</html>
