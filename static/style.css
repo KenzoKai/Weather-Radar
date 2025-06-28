@@ -332,3 +332,37 @@ body {
 .radar-icon div {
     animation: radar-pulse 3s infinite;
 }
+
+/* Sweep Animation Styles */
+.sweep-controls {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 10px;
+    margin-top: 10px;
+}
+
+.sweep-indicator {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: #00ff00;
+    border-radius: 50%;
+    margin-right: 8px;
+    animation: sweep-pulse 2s infinite;
+}
+
+@keyframes sweep-pulse {
+    0% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(1.2); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+/* Enhanced Auto-refresh styling */
+.auto-refresh {
+    padding: 5px 0;
+}
+
+.auto-refresh:last-child {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 10px;
+    margin-top: 5px;
+}

@@ -18,11 +18,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+from sklearn.cluster import DBSCAN
+from scipy.spatial import ConvexHull
+from shapely.geometry import Point, Polygon
+from shapely.ops import unary_union
 
 from flask import Flask, Response, request, render_template, jsonify
+from flask_socketio import SocketIO, emit
 from botocore.config import Config
 from botocore import UNSIGNED
 from pyart.io.nexrad_archive import read_nexrad_archive
+import threading
 
 # ——————————————
 # Configuration
@@ -56,6 +62,13 @@ s3 = boto3.client(
 )
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'radar_secret_key_2024'
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Global variables for streaming
+streaming_active = False
+current_radar_data = None
+last_volume_key = None
 
 def list_today_volumes():
     """List all radar volumes for today"""
@@ -130,7 +143,7 @@ def get_radar_data():
         return None, str(e)
 
 def create_radar_overlay(radar, sweep_idx=0, min_dbz_threshold=7.0, sampling_step=2):
-    """Create optimized radar overlay data for map display with filtering"""
+    """Create radar overlay with clustered topographical contours"""
     try:
         # Get radar data
         ref_data = radar.get_field(sweep_idx, 'reflectivity')
@@ -146,39 +159,232 @@ def create_radar_overlay(radar, sweep_idx=0, min_dbz_threshold=7.0, sampling_ste
         y = range_2d * np.cos(az_2d)
         
         # Convert to lat/lon
-        # Approximate conversion (good for small distances)
         lat_offset = y / 111320.0  # meters to degrees latitude
         lon_offset = x / (111320.0 * np.cos(np.deg2rad(RADAR_LAT)))
         
         lats = RADAR_LAT + lat_offset
         lons = RADAR_LON + lon_offset
         
-        # Create high-resolution overlay data
+        # Define dBZ levels for clustering
+        dbz_levels = [
+            {'min': 7, 'max': 15, 'color': '#02FD02', 'bg_color': '#014A01', 'name': 'Light'},
+            {'min': 15, 'max': 25, 'color': '#01C501', 'bg_color': '#006300', 'name': 'Moderate'},
+            {'min': 25, 'max': 35, 'color': '#FDF802', 'bg_color': '#7D7C01', 'name': 'Heavy'},
+            {'min': 35, 'max': 45, 'color': '#FD9500', 'bg_color': '#7D4A00', 'name': 'Very Heavy'},
+            {'min': 45, 'max': 55, 'color': '#FD0000', 'bg_color': '#7D0000', 'name': 'Intense'},
+            {'min': 55, 'max': 100, 'color': '#FD00FD', 'bg_color': '#4A0080', 'name': 'Extreme'}
+        ]
+        
         overlay_data = []
+        contour_clusters = []
         mask = ~ref_data.mask if hasattr(ref_data, 'mask') else np.ones_like(ref_data, dtype=bool)
         
-        # Optimized data processing with filtering and sampling
         max_i = min(ref_data.shape[0], lats.shape[0])
         max_j = min(ref_data.shape[1], lats.shape[1])
         
-        # Apply user-defined filtering and sampling
+        # Collect all valid data points with their coordinates
+        all_points = []
         for i in range(0, max_i, sampling_step):
             for j in range(0, max_j, sampling_step):
                 if (i < mask.shape[0] and j < mask.shape[1] and
                     mask[i, j] and ref_data[i, j] >= min_dbz_threshold):
+                    
+                    dbz_value = float(ref_data[i, j])
+                    lat = float(lats[i, j])
+                    lon = float(lons[i, j])
+                    
+                    all_points.append({
+                        'lat': lat,
+                        'lon': lon,
+                        'dbz': dbz_value,
+                        'color': get_reflectivity_color(dbz_value)
+                    })
+                    
                     overlay_data.append({
-                        'lat': float(lats[i, j]),
-                        'lon': float(lons[i, j]),
-                        'value': float(ref_data[i, j]),
-                        'color': get_reflectivity_color(ref_data[i, j])
+                        'lat': lat,
+                        'lon': lon,
+                        'value': dbz_value,
+                        'color': get_reflectivity_color(dbz_value)
                     })
         
-        logging.info(f"Created overlay with {len(overlay_data)} points (threshold: {min_dbz_threshold} dBZ, sampling: every {sampling_step} points)")
-        return overlay_data
+        # Process dBZ levels in reverse order (highest to lowest) for proper topographical layering
+        # This creates nested contours where higher intensities are inside lower intensities
+        for level_idx, level in enumerate(reversed(dbz_levels)):
+            # For topographical contours, include all points >= this level's minimum
+            # This creates the layered effect where each contour encompasses all higher intensities
+            level_points = [p for p in all_points if p['dbz'] >= level['min']]
+            
+            if len(level_points) < 3:  # Need minimum points for clustering
+                continue
+                
+            # Adjust level_idx for reversed processing
+            actual_level_idx = len(dbz_levels) - 1 - level_idx
+            logging.info(f"Processing topographical layer dBZ {level['min']}+: {len(level_points)} points")
+            
+            # Convert to coordinate arrays for clustering and calculate distances from radar
+            coords = np.array([[p['lat'], p['lon']] for p in level_points])
+            
+            # Calculate distance from radar center for each point
+            distances = []
+            for p in level_points:
+                # Calculate distance in degrees (approximate)
+                lat_diff = p['lat'] - RADAR_LAT
+                lon_diff = p['lon'] - RADAR_LON
+                distance = np.sqrt(lat_diff**2 + lon_diff**2)
+                distances.append(distance)
+            
+            distances = np.array(distances)
+            
+            # Adaptive clustering based on distance from radar center
+            # Points farther from radar need larger clustering distances due to beam spreading
+            base_eps_values = {
+                'light': 0.025,    # Base eps for light precipitation
+                'moderate': 0.02,  # Base eps for moderate precipitation
+                'heavy': 0.015     # Base eps for heavy precipitation
+            }
+            
+            if level['min'] < 15:  # Light precipitation
+                base_eps = base_eps_values['light']
+                base_min_samples = max(2, min(5, len(level_points) // 30))
+            elif level['min'] < 35:  # Moderate to heavy
+                base_eps = base_eps_values['moderate']
+                base_min_samples = max(2, min(4, len(level_points) // 25))
+            else:  # Very heavy to extreme
+                base_eps = base_eps_values['heavy']
+                base_min_samples = max(2, min(3, len(level_points) // 15))
+            
+            # Adaptive eps based on distance - increase clustering distance for farther points
+            # Points closer than 1 degree use base eps, farther points get progressively larger eps
+            adaptive_eps = []
+            for dist in distances:
+                if dist < 1.0:  # Close to radar (< ~111km)
+                    eps_factor = 1.0
+                elif dist < 2.0:  # Medium distance (111-222km)
+                    eps_factor = 1.5
+                else:  # Far from radar (> 222km)
+                    eps_factor = 2.0
+                
+                adaptive_eps.append(base_eps * eps_factor)
+            
+            # Use the maximum adaptive eps for this cluster level
+            eps = max(adaptive_eps) if adaptive_eps else base_eps
+            min_samples = max(2, min(base_min_samples, len(level_points) // 4))
+            
+            clustering = DBSCAN(eps=eps, min_samples=min_samples).fit(coords)
+            labels = clustering.labels_
+            
+            # Debug information
+            unique_labels = set(labels)
+            n_clusters = len(unique_labels) - (1 if -1 in labels else 0)
+            n_noise = list(labels).count(-1)
+            logging.info(f"dBZ {level['min']}-{level['max']}: {n_clusters} clusters, {n_noise} noise points (eps={eps}, min_samples={min_samples})")
+            
+            # Process each cluster
+            for label in unique_labels:
+                if label == -1:  # Skip noise points
+                    continue
+                    
+                # Get points in this cluster
+                cluster_mask = labels == label
+                cluster_coords = coords[cluster_mask]
+                cluster_points = [level_points[i] for i in range(len(level_points)) if cluster_mask[i]]
+                
+                if len(cluster_coords) < 2:
+                    continue
+                
+                # Create contour polygon for this cluster
+                try:
+                    # Convert to Shapely points (lon, lat for Shapely)
+                    points_shapely = [Point(cluster_coords[i][1], cluster_coords[i][0]) for i in range(len(cluster_coords))]
+                    
+                    # Calculate average distance from radar for this cluster
+                    cluster_distances = [distances[i] for i in range(len(level_points)) if cluster_mask[i]]
+                    avg_distance = np.mean(cluster_distances) if cluster_distances else 0
+                    
+                    # Adjust buffer size based on dBZ level, cluster size, and distance from radar
+                    cluster_size_factor = min(1.5, len(cluster_coords) / 5.0)
+                    
+                    # Distance-based buffer scaling - farther points get larger buffers
+                    if avg_distance < 1.0:  # Close to radar
+                        distance_factor = 1.0
+                    elif avg_distance < 2.0:  # Medium distance
+                        distance_factor = 1.3
+                    else:  # Far from radar
+                        distance_factor = 1.6
+                    
+                    if level['min'] < 15:  # Light precipitation
+                        base_buffer = 0.008
+                    elif level['min'] < 35:  # Moderate to heavy
+                        base_buffer = 0.006
+                    else:  # Very heavy to extreme
+                        base_buffer = 0.005
+                    
+                    buffer_size = base_buffer * cluster_size_factor * distance_factor
+                    
+                    # Create individual buffers and union them
+                    buffered_points = [point.buffer(buffer_size) for point in points_shapely]
+                    cluster_polygon = unary_union(buffered_points)
+                    
+                    # Apply smoothing by using a smaller simplification tolerance
+                    # and adding a small secondary buffer to smooth sharp corners
+                    tolerance = buffer_size * 0.15  # Much smaller tolerance for smoother curves
+                    cluster_polygon = cluster_polygon.simplify(tolerance, preserve_topology=True)
+                    
+                    # Apply a small secondary buffer and negative buffer to smooth corners
+                    smooth_buffer = buffer_size * 0.1  # Small smoothing buffer
+                    cluster_polygon = cluster_polygon.buffer(smooth_buffer).buffer(-smooth_buffer)
+                    
+                    # Convert back to lat/lon coordinates for frontend
+                    if hasattr(cluster_polygon, 'exterior'):
+                        # Single polygon
+                        exterior_coords = list(cluster_polygon.exterior.coords)
+                        polygon_coords = [[coord[1], coord[0]] for coord in exterior_coords]
+                        
+                        contour_clusters.append({
+                            'polygon': polygon_coords,
+                            'dbz_range': f"{level['min']}-{level['max']} dBZ",
+                            'color': level['color'],
+                            'bg_color': level['bg_color'],
+                            'name': level['name'],
+                            'min_dbz': level['min'],
+                            'max_dbz': level['max'],
+                            'cluster_id': f"level_{actual_level_idx}_cluster_{label}",
+                            'point_count': len(cluster_points)
+                        })
+                    elif hasattr(cluster_polygon, 'geoms'):
+                        # Multiple polygons (MultiPolygon)
+                        for i, poly in enumerate(cluster_polygon.geoms):
+                            if hasattr(poly, 'exterior') and poly.area > 0.000001:
+                                simplified_poly = poly.simplify(tolerance, preserve_topology=True)
+                                if hasattr(simplified_poly, 'exterior'):
+                                    exterior_coords = list(simplified_poly.exterior.coords)
+                                    polygon_coords = [[coord[1], coord[0]] for coord in exterior_coords]
+                                    
+                                    contour_clusters.append({
+                                        'polygon': polygon_coords,
+                                        'dbz_range': f"{level['min']}-{level['max']} dBZ",
+                                        'color': level['color'],
+                                        'bg_color': level['bg_color'],
+                                        'name': level['name'],
+                                        'min_dbz': level['min'],
+                                        'max_dbz': level['max'],
+                                        'cluster_id': f"level_{actual_level_idx}_cluster_{label}_part_{i}",
+                                        'point_count': len(cluster_points)
+                                    })
+                
+                except Exception as e:
+                    logging.warning(f"Error creating contour for cluster {label} in level {level['name']}: {e}")
+                    continue
+        
+        logging.info(f"Created overlay with {len(overlay_data)} points and {len(contour_clusters)} contour clusters")
+        return {
+            'points': overlay_data,
+            'contours': contour_clusters
+        }
     
     except Exception as e:
         logging.exception("Error creating radar overlay")
-        return []
+        return {'points': [], 'contours': []}
 
 def get_reflectivity_color(value):
     """Get color for reflectivity value based on NWS color scale"""
@@ -364,6 +570,41 @@ def radar_bounds():
         logging.exception("Error calculating radar bounds")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/radar_status')
+def radar_status():
+    """Get current radar scanning status and azimuth information"""
+    try:
+        radar, timestamp = get_radar_data()
+        if radar is None:
+            return jsonify({'error': 'No radar data available'}), 500
+        
+        # Get the latest sweep information
+        latest_sweep = radar.nsweeps - 1
+        azimuth_data = radar.azimuth['data'][radar.get_start_end(latest_sweep)[0]:radar.get_start_end(latest_sweep)[1]]
+        
+        # Calculate current scanning position (simulate real-time)
+        import time
+        current_time = time.time()
+        # Simulate 6 RPM (10 seconds per full rotation)
+        rotation_period = 10.0  # seconds
+        current_angle = ((current_time % rotation_period) / rotation_period) * 360
+        
+        return jsonify({
+            'success': True,
+            'current_azimuth': current_angle,
+            'sweep_count': radar.nsweeps,
+            'azimuth_range': {
+                'min': float(np.min(azimuth_data)),
+                'max': float(np.max(azimuth_data))
+            },
+            'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S %Z'),
+            'scanning': True
+        })
+    
+    except Exception as e:
+        logging.exception("Error getting radar status")
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/test_image')
 def test_image():
     """Test endpoint to verify image generation"""
@@ -390,5 +631,125 @@ def test_image():
         logging.exception("Error generating test image")
         return Response("Error generating test image", status=500)
 
+# WebSocket event handlers
+@socketio.on('connect')
+def handle_connect():
+    logging.info('Client connected')
+    emit('status', {'message': 'Connected to radar stream'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    logging.info('Client disconnected')
+
+@socketio.on('start_streaming')
+def handle_start_streaming(data):
+    global streaming_active
+    streaming_active = True
+    
+    # Get filter parameters
+    elevation = data.get('elevation', 0.5)
+    threshold = data.get('threshold', 7.0)
+    density = data.get('density', 2)
+    
+    logging.info(f"Starting radar stream with elev={elevation}, threshold={threshold}, density={density}")
+    
+    # Start background streaming thread
+    thread = threading.Thread(target=stream_radar_data, args=(elevation, threshold, density))
+    thread.daemon = True
+    thread.start()
+
+@socketio.on('stop_streaming')
+def handle_stop_streaming():
+    global streaming_active
+    streaming_active = False
+    logging.info('Stopping radar stream')
+
+@socketio.on('update_filters')
+def handle_update_filters(data):
+    # Emit updated radar data with new filters
+    if current_radar_data:
+        elevation = data.get('elevation', 0.5)
+        threshold = data.get('threshold', 7.0)
+        density = data.get('density', 2)
+        
+        try:
+            radar, timestamp = current_radar_data
+            angles = radar.fixed_angle['data']
+            sweep_idx = int(np.argmin(np.abs(angles - elevation)))
+            
+            radar_data = create_radar_overlay(radar, sweep_idx, threshold, density)
+            
+            emit('radar_data', {
+                'success': True,
+                'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                'elevation': float(angles[sweep_idx]),
+                'overlay_data': radar_data['points'],
+                'contour_zones': radar_data['contours'],
+                'filter_info': {
+                    'min_dbz': threshold,
+                    'density': density,
+                    'point_count': len(radar_data['points']),
+                    'contour_count': len(radar_data['contours'])
+                }
+            })
+        except Exception as e:
+            emit('error', {'message': str(e)})
+
+def stream_radar_data(elevation, threshold, density):
+    """Background function to stream radar data via WebSocket"""
+    global streaming_active, current_radar_data, last_volume_key
+    
+    while streaming_active:
+        try:
+            # Check for new radar data
+            key = latest_volume_key()
+            if key and key != last_volume_key:
+                logging.info(f"New radar volume detected: {key}")
+                last_volume_key = key
+                
+                # Get and process radar data
+                radar, timestamp = get_radar_data()
+                if radar:
+                    current_radar_data = (radar, timestamp)
+                    
+                    # Process data with current filters
+                    angles = radar.fixed_angle['data']
+                    sweep_idx = int(np.argmin(np.abs(angles - elevation)))
+                    
+                    radar_data = create_radar_overlay(radar, sweep_idx, threshold, density)
+                    
+                    # Emit radar data to all connected clients
+                    socketio.emit('radar_data', {
+                        'success': True,
+                        'timestamp': timestamp.strftime('%Y-%m-%d %H:%M:%S %Z'),
+                        'elevation': float(angles[sweep_idx]),
+                        'overlay_data': radar_data['points'],
+                        'contour_zones': radar_data['contours'],
+                        'filter_info': {
+                            'min_dbz': threshold,
+                            'density': density,
+                            'point_count': len(radar_data['points']),
+                            'contour_count': len(radar_data['contours'])
+                        }
+                    })
+                    
+                    # Emit sweep animation data
+                    current_time = time.time()
+                    rotation_period = 10.0  # 10 seconds per rotation
+                    current_angle = ((current_time % rotation_period) / rotation_period) * 360
+                    
+                    socketio.emit('sweep_update', {
+                        'azimuth': current_angle,
+                        'scanning': True
+                    })
+            
+            # Sleep before checking again
+            time.sleep(2)  # Check every 2 seconds
+            
+        except Exception as e:
+            logging.exception("Error in radar streaming")
+            socketio.emit('error', {'message': str(e)})
+            time.sleep(5)  # Wait longer on error
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True)

@@ -63,6 +63,11 @@
             <label for="autoRefresh">Auto-refresh (30s)</label>
         </div>
         
+        <div class="control-group auto-refresh">
+            <input type="checkbox" id="sweepAnimation" checked>
+            <label for="sweepAnimation">Radar Sweep Animation</label>
+        </div>
+        
         <button class="refresh-btn" id="refreshBtn">Refresh Data</button>
         
         <div class="status" id="status">Loading...</div>
@@ -135,6 +140,9 @@
     <!-- Leaflet JavaScript -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     
+    <!-- Socket.IO JavaScript -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+    
     <script>
         // Configuration from server
         const RADAR_LAT = {{ radar_lat|tojson }};
@@ -180,10 +188,17 @@
         
         radarMarker.bindPopup(SITE + ' Radar Site');
         
+        // Initialize Socket.IO connection
+        const socket = io();
+        
         // Radar overlay variables
         let radarOverlay = null;
+        let radarContourLayers = [];
+        let radarSweepLine = null;
         let radarData = null;
-        let autoRefreshInterval = null;
+        let sweepAnimationInterval = null;
+        let currentSweepAngle = 0;
+        let isStreaming = false;
         
         // DOM elements
         const elevationSelect = document.getElementById('elevation');
@@ -191,6 +206,7 @@
         const thresholdSelect = document.getElementById('threshold');
         const densitySelect = document.getElementById('density');
         const autoRefreshCheckbox = document.getElementById('autoRefresh');
+        const sweepAnimationCheckbox = document.getElementById('sweepAnimation');
         const refreshBtn = document.getElementById('refreshBtn');
         const statusDiv = document.getElementById('status');
         
@@ -200,102 +216,284 @@
             statusDiv.className = `status ${type}`;
         }
         
-        // Load radar data
-        async function loadRadarData() {
-            try {
-                updateStatus('Loading radar data...', 'loading');
-                refreshBtn.disabled = true;
-                
-                const elevation = elevationSelect.value;
-                const threshold = thresholdSelect.value;
-                const density = densitySelect.value;
-                const response = await fetch(`/api/radar_data?elev=${elevation}&threshold=${threshold}&density=${density}`);
-                const data = await response.json();
-                
-                if (data.success) {
-                    radarData = data;
-                    updateRadarOverlay();
-                    const filterInfo = data.filter_info || {};
-                    updateStatus(`Updated: ${data.timestamp} (${data.elevation.toFixed(1)}°) - ${filterInfo.point_count || 0} points`, 'success');
-                } else {
-                    updateStatus(`Error: ${data.error}`, 'error');
-                }
-            } catch (error) {
-                console.error('Error loading radar data:', error);
-                updateStatus(`Error: ${error.message}`, 'error');
-            } finally {
-                refreshBtn.disabled = false;
+        // WebSocket event handlers
+        socket.on('connect', function() {
+            updateStatus('Connected to radar stream', 'success');
+            startStreaming();
+        });
+        
+        socket.on('disconnect', function() {
+            updateStatus('Disconnected from radar stream', 'error');
+            isStreaming = false;
+        });
+        
+        socket.on('radar_data', function(data) {
+            radarData = data;
+            updateRadarOverlay();
+            const filterInfo = data.filter_info || {};
+            updateStatus(`Live: ${data.timestamp} (${data.elevation.toFixed(1)}°) - ${filterInfo.point_count || 0} points, ${filterInfo.contour_count || 0} clusters`, 'success');
+        });
+        
+        socket.on('sweep_update', function(data) {
+            if (sweepAnimationCheckbox.checked) {
+                currentSweepAngle = data.azimuth;
+                createSweepLine();
             }
+        });
+        
+        socket.on('error', function(data) {
+            updateStatus(`Error: ${data.message}`, 'error');
+        });
+        
+        socket.on('status', function(data) {
+            console.log('Status:', data.message);
+        });
+        
+        // Start streaming radar data
+        function startStreaming() {
+            if (isStreaming) return;
+            
+            isStreaming = true;
+            updateStatus('Starting radar stream...', 'loading');
+            
+            socket.emit('start_streaming', {
+                elevation: parseFloat(elevationSelect.value),
+                threshold: parseFloat(thresholdSelect.value),
+                density: parseInt(densitySelect.value)
+            });
         }
         
-        // Update radar overlay on map using high-resolution points
-        function updateRadarOverlay() {
-            if (!radarData || !radarData.overlay_data) return;
+        // Stop streaming radar data
+        function stopStreaming() {
+            if (!isStreaming) return;
             
-            // Remove existing overlay
+            isStreaming = false;
+            socket.emit('stop_streaming');
+            updateStatus('Radar stream stopped', 'error');
+        }
+        
+        // Update filters via WebSocket
+        function updateFilters() {
+            if (!isStreaming) return;
+            
+            socket.emit('update_filters', {
+                elevation: parseFloat(elevationSelect.value),
+                threshold: parseFloat(thresholdSelect.value),
+                density: parseInt(densitySelect.value)
+            });
+        }
+        
+        // Update radar overlay with topographical contour zones
+        function updateRadarOverlay() {
+            if (!radarData) return;
+            
+            // Remove existing overlays - ensure complete cleanup
             if (radarOverlay) {
                 map.removeLayer(radarOverlay);
+                radarOverlay = null;
             }
             
-            console.log(`Creating high-resolution radar overlay with ${radarData.overlay_data.length} points`);
+            // Clear all contour layers completely
+            radarContourLayers.forEach(layer => {
+                if (map.hasLayer(layer)) {
+                    map.removeLayer(layer);
+                }
+            });
+            radarContourLayers = [];
             
-            // Create high-density point overlay for maximum resolution
-            const points = radarData.overlay_data.map(point => {
-                return L.circleMarker([point.lat, point.lon], {
-                    radius: 2.5,  // Optimized size for coverage vs performance
-                    fillColor: point.color,
-                    color: point.color,
-                    weight: 0,
-                    opacity: parseFloat(opacitySlider.value),
-                    fillOpacity: parseFloat(opacitySlider.value)
-                }).bindTooltip(`${point.value.toFixed(1)} dBZ`, {
-                    direction: 'top',
-                    offset: [0, -5]
-                });
+            // Force clear any remaining layers by iterating through all map layers
+            map.eachLayer(function(layer) {
+                if (layer.options && layer.options.cluster_id) {
+                    map.removeLayer(layer);
+                }
             });
             
-            radarOverlay = L.layerGroup(points).addTo(map);
-            updateStatus(`Displaying ${points.length} radar data points`, 'success');
+            // Create clustered contour polygons in reverse order (lowest intensity first)
+            // This ensures higher intensity contours appear on top for proper topographical layering
+            if (radarData.contour_zones) {
+                // Sort contours by minimum dBZ value (lowest first) for proper layering
+                const sortedContours = radarData.contour_zones.slice().sort((a, b) => a.min_dbz - b.min_dbz);
+                
+                sortedContours.forEach(cluster => {
+                    if (cluster.polygon && cluster.polygon.length > 2) {
+                        // Create filled polygon with darker background
+                        const contourPolygon = L.polygon(cluster.polygon, {
+                            fillColor: cluster.bg_color,
+                            fillOpacity: 0.5,
+                            color: cluster.color,
+                            weight: 2,
+                            opacity: 0.9,
+                            smoothFactor: 4.0,  // Increased smoothing
+                            lineCap: 'round',   // Rounded line caps
+                            lineJoin: 'round',  // Rounded line joins
+                            cluster_id: cluster.cluster_id  // Add cluster ID for identification
+                        }).bindTooltip(`${cluster.name} Cluster: ${cluster.dbz_range} (${cluster.point_count} points)`, {
+                            direction: 'center',
+                            permanent: false
+                        });
+                        
+                        contourPolygon.addTo(map);
+                        radarContourLayers.push(contourPolygon);
+                    }
+                });
+            }
+            
+            // Create point overlay on top for detail
+            if (radarData.overlay_data) {
+                console.log(`Creating radar overlay with ${radarData.overlay_data.length} points and ${radarContourLayers.length} contour zones`);
+                
+                const points = radarData.overlay_data.map(point => {
+                    return L.circleMarker([point.lat, point.lon], {
+                        radius: 1.5,  // Smaller points since we have contours
+                        fillColor: point.color,
+                        color: point.color,
+                        weight: 0,
+                        opacity: parseFloat(opacitySlider.value) * 0.7,
+                        fillOpacity: parseFloat(opacitySlider.value) * 0.7
+                    }).bindTooltip(`${point.value.toFixed(1)} dBZ`, {
+                        direction: 'top',
+                        offset: [0, -5]
+                    });
+                });
+                
+                radarOverlay = L.layerGroup(points).addTo(map);
+            }
+            
+            const filterInfo = radarData.filter_info || {};
+            updateStatus(`Live: ${radarData.timestamp} - ${filterInfo.point_count || 0} points, ${filterInfo.contour_count || 0} zones`, 'success');
+        }
+        
+        // Create convex hull for contour zones
+        function createConvexHull(points) {
+            if (points.length < 3) return points;
+            
+            // Simple convex hull algorithm (Graham scan simplified)
+            // Sort points by latitude first
+            const sorted = points.slice().sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+            
+            // For radar data, we'll use a simplified approach
+            // Group nearby points and create a rough boundary
+            const hull = [];
+            const step = Math.max(1, Math.floor(sorted.length / 20)); // Max 20 points for performance
+            
+            for (let i = 0; i < sorted.length; i += step) {
+                hull.push(sorted[i]);
+            }
+            
+            // Close the polygon
+            if (hull.length > 0 && hull[0] !== hull[hull.length - 1]) {
+                hull.push(hull[0]);
+            }
+            
+            return hull;
         }
         
         // Update overlay opacity
         function updateOverlayOpacity() {
             const opacity = parseFloat(opacitySlider.value);
             
+            // Update point overlay
             if (radarOverlay) {
                 radarOverlay.eachLayer(layer => {
                     if (layer.setStyle) {
                         layer.setStyle({
-                            opacity: opacity,
-                            fillOpacity: opacity
+                            opacity: opacity * 0.7,
+                            fillOpacity: opacity * 0.7
                         });
                     }
                 });
             }
+            
+            // Update contour layers
+            radarContourLayers.forEach(layer => {
+                if (layer.setStyle) {
+                    layer.setStyle({
+                        fillOpacity: opacity * 0.4,
+                        opacity: opacity * 0.8
+                    });
+                }
+            });
         }
         
-        // Setup auto-refresh
-        function setupAutoRefresh() {
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
+        // Create radar sweep line
+        function createSweepLine() {
+            if (radarSweepLine) {
+                map.removeLayer(radarSweepLine);
             }
             
+            // Calculate sweep line endpoint (230km range)
+            const range = 230000; // meters
+            const angleRad = (currentSweepAngle * Math.PI) / 180;
+            
+            // Convert to lat/lon offset
+            const latOffset = (range * Math.cos(angleRad)) / 111320.0;
+            const lonOffset = (range * Math.sin(angleRad)) / (111320.0 * Math.cos(RADAR_LAT * Math.PI / 180));
+            
+            const endLat = RADAR_LAT + latOffset;
+            const endLon = RADAR_LON + lonOffset;
+            
+            // Create sweep line
+            radarSweepLine = L.polyline([
+                [RADAR_LAT, RADAR_LON],
+                [endLat, endLon]
+            ], {
+                color: '#00ff00',
+                weight: 3,
+                opacity: 0.8,
+                dashArray: '10, 5'
+            }).addTo(map);
+        }
+        
+        // Animate radar sweep (now driven by WebSocket data)
+        function animateSweep() {
+            if (!sweepAnimationCheckbox.checked) return;
+            createSweepLine();
+        }
+        
+        // Setup sweep animation
+        function setupSweepAnimation() {
+            if (sweepAnimationInterval) {
+                clearInterval(sweepAnimationInterval);
+            }
+            
+            if (radarSweepLine) {
+                map.removeLayer(radarSweepLine);
+                radarSweepLine = null;
+            }
+            
+            if (sweepAnimationCheckbox.checked) {
+                sweepAnimationInterval = setInterval(animateSweep, 100); // 10 FPS
+                createSweepLine();
+            }
+        }
+        
+        // Setup streaming control
+        function setupStreaming() {
             if (autoRefreshCheckbox.checked) {
-                autoRefreshInterval = setInterval(loadRadarData, 30000); // 30 seconds
+                startStreaming();
+            } else {
+                stopStreaming();
             }
         }
         
         // Event listeners
-        elevationSelect.addEventListener('change', loadRadarData);
-        thresholdSelect.addEventListener('change', loadRadarData);
-        densitySelect.addEventListener('change', loadRadarData);
+        elevationSelect.addEventListener('change', updateFilters);
+        thresholdSelect.addEventListener('change', updateFilters);
+        densitySelect.addEventListener('change', updateFilters);
         opacitySlider.addEventListener('input', updateOverlayOpacity);
-        autoRefreshCheckbox.addEventListener('change', setupAutoRefresh);
-        refreshBtn.addEventListener('click', loadRadarData);
+        autoRefreshCheckbox.addEventListener('change', setupStreaming);
+        sweepAnimationCheckbox.addEventListener('change', setupSweepAnimation);
+        refreshBtn.addEventListener('click', function() {
+            if (isStreaming) {
+                stopStreaming();
+                setTimeout(startStreaming, 1000); // Restart after 1 second
+            } else {
+                startStreaming();
+            }
+        });
         
-        // Initial load
-        loadRadarData();
-        setupAutoRefresh();
+        // Initial setup - WebSocket will auto-connect and start streaming
+        setupSweepAnimation();
     </script>
 </body>
 </html>
