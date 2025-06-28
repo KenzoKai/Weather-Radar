@@ -3,12 +3,11 @@
 A sophisticated web application that displays NEXRAD weather radar data with advanced topographical contour visualization overlayed on an interactive map. This application fetches real-time radar data from NOAA's AWS S3 bucket and creates professional-grade topographical contours with distance-adaptive clustering.
 
 <img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad1.png?raw=true" alt="KenzoRadar" width="100%">
-<p>
-<center>
+<p hspace="5">
 <img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad2.png?raw=true" alt="KenzoRadar" width="260" hspace="5">
 <img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad3.png?raw=true" alt="KenzoRadar" width="260" hspace="5">
 <img src="https://github.com/KenzoKai/Weather-Radar/blob/main/nexrad4.png?raw=true" alt="KenzoRadar" width="260" hspace="5">
-</center>
+
 </p>
 ## Features
 
