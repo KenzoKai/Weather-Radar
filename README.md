@@ -2,6 +2,7 @@
 
 A sophisticated web application that displays NEXRAD weather radar data with advanced topographical contour visualization overlayed on an interactive map. This application fetches real-time radar data from NOAA's AWS S3 bucket and creates professional-grade topographical contours with distance-adaptive clustering.
 
+![[nexrad1.png]]
 ## Features
 
 ### Core Functionality
@@ -234,3 +235,6 @@ Contributions are welcome! Please consider:
 - **PyART Community**: For excellent radar data processing tools
 - **Leaflet.js**: For powerful mapping capabilities
 - **scikit-learn**: For robust clustering algorithms
+
+![[nexrad4.png]]![[nexrad3.png]]
+![[nexrad2.png]]
