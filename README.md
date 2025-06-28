@@ -1,23 +1,35 @@
-<<<<<<< HEAD
 # Weather Radar Web Application
 
-A modern web application that displays NEXRAD weather radar data overlayed on an interactive map. This application fetches real-time radar data from NOAA's AWS S3 bucket and displays it on a Leaflet map with accurate geographic positioning.
+A sophisticated web application that displays NEXRAD weather radar data with advanced topographical contour visualization overlayed on an interactive map. This application fetches real-time radar data from NOAA's AWS S3 bucket and creates professional-grade topographical contours with distance-adaptive clustering.
 
 ## Features
 
+### Core Functionality
 - **Real-time Radar Data**: Fetches the latest NEXRAD Level II data from NOAA
-- **Interactive Map**: Uses Leaflet.js for smooth map interaction
-- **Multiple Elevation Angles**: Choose from different radar sweep elevations
-- **Auto-refresh**: Automatically updates every 30 seconds
-- **Adjustable Opacity**: Control radar overlay transparency
-- **Color-coded Reflectivity**: Standard NWS color scale for precipitation intensity
-- **Dark/Light Map Themes**: Toggle between map styles for better visibility
+- **Interactive Map**: Uses Leaflet.js for smooth map interaction with dark/light themes
+- **WebSocket Streaming**: Real-time data updates via Socket.IO
+- **Multiple Elevation Angles**: Choose from different radar sweep elevations (0.5° to 19.5°)
+- **Radar Sweep Animation**: Live rotating beam visualization
+
+### Advanced Topographical Contours
+- **Nested Contour Layers**: True topographical-style contours where higher intensities are nested within lower intensities
+- **Distance-Adaptive Clustering**: Intelligent clustering that adapts to radar beam spreading at longer ranges
+- **DBSCAN Clustering Algorithm**: Groups nearby precipitation points for coherent contour boundaries
+- **Smooth Polygon Rendering**: Advanced polygon simplification with rounded corners and edges
+- **Six dBZ Intensity Levels**: Light (7-15), Moderate (15-25), Heavy (25-35), Very Heavy (35-45), Intense (45-55), Extreme (55+)
+
+### Interactive Controls
+- **Data Filtering**: Adjustable dBZ threshold and data density controls
+- **Opacity Control**: Separate opacity controls for point overlays and contour layers
+- **Auto-refresh**: Configurable automatic data updates
+- **Manual Refresh**: On-demand data refresh capability
 
 ## Current Configuration
 
 - **Radar Site**: KMOB (Mobile, Alabama)
 - **Location**: 30.6794°N, 88.2397°W
 - **Data Source**: NOAA NEXRAD Level II (AWS S3)
+- **Update Frequency**: Real-time via WebSocket with 30-second polling
 
 ## Installation
 
@@ -40,36 +52,67 @@ A modern web application that displays NEXRAD weather radar data overlayed on an
 
 ## Usage
 
-### Web Interface
+### Web Interface Controls
 
 - **Elevation Angle**: Select different radar sweep angles (0.5° to 19.5°)
-- **Radar Opacity**: Adjust the transparency of the radar overlay
-- **Auto-refresh**: Toggle automatic data updates every 30 seconds
-- **Refresh Data**: Manually refresh the radar data
-- **Map Controls**: Zoom, pan, and switch between map themes
+- **Radar Opacity**: Adjust the transparency of radar overlays
+- **Min dBZ Threshold**: Filter out weak returns (-10 to 15 dBZ)
+- **Data Density**: Control point sampling (every 1st to 4th point)
+- **Auto-refresh**: Toggle automatic data updates
+- **Sweep Animation**: Enable/disable rotating radar beam visualization
 
 ### API Endpoints
 
 - `GET /`: Main web interface
-- `GET /api/radar_data?elev=<angle>`: JSON radar data for map overlay
-- `GET /api/radar_image?elev=<angle>`: PNG radar image (fallback)
+- `GET /api/radar_data`: JSON radar data with contour information
+- `GET /api/radar_image`: PNG radar image (fallback)
+- `GET /api/radar_bounds`: Radar coverage boundary information
+- `GET /api/radar_status`: Current radar scanning status
+- **WebSocket Events**: Real-time data streaming via Socket.IO
 
-## Technical Details
+## Technical Implementation
 
-### Data Processing
+### Topographical Contour System
+
+#### 1. **Nested Contour Logic**
+```python
+# Processes dBZ levels from highest to lowest intensity
+# Each contour encompasses ALL precipitation >= that intensity level
+for level in reversed(dbz_levels):
+    level_points = [p for p in all_points if p['dbz'] >= level['min']]
+```
+
+#### 2. **Distance-Adaptive Clustering**
+- **Close range (< 111km)**: Standard clustering parameters
+- **Medium range (111-222km)**: 1.5x larger clustering distance, 1.3x larger buffers
+- **Long range (> 222km)**: 2.0x larger clustering distance, 1.6x larger buffers
+
+#### 3. **DBSCAN Clustering Parameters**
+- **Light precipitation (7-15 dBZ)**: 2.5km clustering radius, very lenient grouping
+- **Moderate to heavy (15-35 dBZ)**: 2km clustering radius, moderate grouping
+- **Very heavy to extreme (35+ dBZ)**: 1.5km clustering radius, tighter grouping
+
+#### 4. **Polygon Smoothing**
+- **Douglas-Peucker simplification**: Reduces angular edges while preserving shape
+- **Secondary buffer smoothing**: Eliminates sharp corners with positive/negative buffering
+- **Leaflet rendering enhancements**: Increased smoothFactor with rounded line caps/joins
+
+### Data Processing Pipeline
 
 1. **Data Retrieval**: Downloads latest NEXRAD Level II files from AWS S3
 2. **Decompression**: Handles gzipped radar files automatically
 3. **Radar Processing**: Uses PyART (Python ARM Radar Toolkit) for data parsing
 4. **Coordinate Conversion**: Converts polar radar coordinates to geographic lat/lon
-5. **Color Mapping**: Applies NWS standard reflectivity color scale
+5. **Clustering Analysis**: Groups nearby points using distance-adaptive DBSCAN
+6. **Contour Generation**: Creates smooth polygons using Shapely geometric operations
+7. **Topographical Layering**: Renders nested contours from lowest to highest intensity
 
-### Map Overlay
+### Real-time Streaming
 
-- **Point-based Rendering**: Each radar gate becomes a colored circle marker
-- **Geographic Accuracy**: Proper coordinate transformation for accurate positioning
-- **Performance Optimization**: Data sampling to reduce overlay complexity
-- **Interactive Tooltips**: Click points to see reflectivity values
+- **WebSocket Communication**: Bidirectional real-time data streaming
+- **Background Processing**: Separate thread monitors for new radar volumes
+- **Efficient Updates**: Only streams new data when radar volumes change
+- **Client Synchronization**: All connected clients receive simultaneous updates
 
 ## Customization
 
@@ -83,144 +126,111 @@ RADAR_LAT = XX.XXXX  # Radar latitude
 RADAR_LON = -XX.XXXX  # Radar longitude
 ```
 
-### Adjusting Update Frequency
+### Adjusting Clustering Parameters
 
-Change the polling interval in `app.py`:
+Modify clustering sensitivity in the `create_radar_overlay()` function:
 
 ```python
-POLL_INTERVAL = 30  # seconds between checks
+# Adjust eps (clustering distance) and min_samples for different behaviors
+if level['min'] < 15:  # Light precipitation
+    eps = 0.025  # Increase for larger clusters
+    min_samples = max(2, min(5, len(level_points) // 30))
 ```
 
-### Map Styling
+### Customizing Contour Appearance
 
-The application includes both light and dark map themes. You can modify the base layers in the HTML template or add additional tile providers.
+Modify dBZ levels and colors in `app.py`:
+
+```python
+dbz_levels = [
+    {'min': 7, 'max': 15, 'color': '#02FD02', 'bg_color': '#014A01', 'name': 'Light'},
+    # Add or modify levels as needed
+]
+```
 
 ## Dependencies
 
-- **Flask**: Web framework
-- **PyART**: Radar data processing
-- **Boto3**: AWS S3 access
-- **NumPy**: Numerical computations
+### Backend (Python)
+- **Flask**: Web framework and API endpoints
+- **Flask-SocketIO**: Real-time WebSocket communication
+- **PyART**: Advanced radar data processing
+- **Boto3**: AWS S3 access for NEXRAD data
+- **NumPy**: Numerical computations and array operations
 - **Matplotlib**: Color mapping and image generation
-- **Leaflet.js**: Interactive mapping (loaded via CDN)
+- **scikit-learn**: DBSCAN clustering algorithm
+- **Shapely**: Advanced geometric operations and polygon processing
+
+### Frontend (JavaScript)
+- **Leaflet.js**: Interactive mapping and overlay rendering
+- **Socket.IO**: Real-time client-server communication
 
 ## Data Sources
 
 - **NEXRAD Level II Data**: NOAA via AWS S3 (`noaa-nexrad-level2` bucket)
-- **Map Tiles**: OpenStreetMap and CartoDB
+- **Map Tiles**: OpenStreetMap and CartoDB (dark theme)
 - **Radar Locations**: National Weather Service
 
 ## Browser Compatibility
 
-- Modern browsers with JavaScript enabled
+- Modern browsers with JavaScript and WebSocket support
 - Tested on Chrome, Firefox, Safari, and Edge
-- Mobile-responsive design
+- Mobile-responsive design with touch-friendly controls
+
+## Performance Optimization
+
+### Data Sampling
+- Configurable point density to balance detail vs. performance
+- Intelligent filtering based on dBZ thresholds
+- Efficient coordinate transformation algorithms
+
+### Clustering Optimization
+- Adaptive parameters based on data density
+- Distance-based clustering for radar beam characteristics
+- Polygon simplification to reduce rendering complexity
+
+### Real-time Efficiency
+- WebSocket streaming eliminates polling overhead
+- Background processing prevents UI blocking
+- Incremental updates only when new data is available
 
 ## Troubleshooting
 
 ### No Radar Data Available
-
 - Check if the radar site is operational
 - Verify internet connection for AWS S3 access
 - Some radar sites may have temporary outages
 
-### Slow Loading
+### Clustering Issues
+- Adjust clustering parameters for your specific use case
+- Check console logs for clustering statistics
+- Verify sufficient data points for meaningful clusters
 
-- Large radar files can take time to download and process
-- Consider adjusting the data sampling rate in the `create_radar_overlay()` function
+### Performance Issues
+- Reduce data density setting for better performance
+- Increase dBZ threshold to filter weak returns
+- Consider using fewer elevation angles
 
-### Map Not Loading
-
-- Ensure internet connection for map tile downloads
-- Check browser console for JavaScript errors
+### WebSocket Connection Problems
+- Check firewall settings for WebSocket traffic
+- Verify Socket.IO client/server version compatibility
+- Monitor browser console for connection errors
 
 ## License
 
 This project uses publicly available NOAA weather data and open-source libraries. Please respect the terms of service for all data sources and dependencies.
-=======
-# Radar MJPEG Streaming Flask App
 
-This Flask application streams real-time NEXRAD Level-II radar data as an MJPEG series of images, rendering a 2000×2000 px reflectivity PPI with a North arrow and local timestamp. You can select the radar elevation angle (tilt) on the fly via a URL parameter.
+## Contributing
 
----
+Contributions are welcome! Please consider:
+- Improving clustering algorithms
+- Adding new visualization features
+- Optimizing performance
+- Supporting additional radar sites
+- Enhancing mobile experience
 
-## Features
+## Acknowledgments
 
-* **Live MJPEG stream** of the most recent full-volume radar scan (`_V06`) from the NOAA Level-II S3 bucket.
-* **Custom elevation**: choose any tilt (default ≈ 0.2°) by requesting `?elev=<angle>` (e.g. `?elev=0.9`).
-* **High resolution**: 2000×2000 px output (10 in × 10 in @ 200 dpi).
-* **North arrow** overlay in the lower-left corner.
-* **Local time** title: timestamps parsed from the file name and converted to your timezone (America/Chicago by default).
-* **Zero front-end code**: just point any browser or `<img>` to the `/radar_stream` endpoint.
-
----
-
-## Requirements
-
-* Python 3.9+
-* Flask
-* boto3
-* botocore
-* pyart
-* matplotlib
-* numpy
-
-Install via:
-
-```bash
-pip install flask boto3 botocore numpy matplotlib arm_pyart
-```
-
-(Note: `arm_pyart` may be the package name for Py-ART; adjust as needed.)
-
----
-
-## Installation & Running
-
-1. **Clone or copy** this script (e.g. `radar_stream.py`).
-
-2. **Configure your environment**: ensure network access to S3, or set AWS credentials if required (the NOAA bucket allows unsigned access).
-
-3. **Run**:
-
-   ```bash
-   python radar_stream.py
-   ```
-
-4. **Browse**:
-
-   * Default tilt (≈ 0.2°): `http://localhost:5000/radar_stream`
-   * Custom tilt (e.g. 0.9°): `http://localhost:5000/radar_stream?elev=0.9`
-
-Embed in HTML:
-
-```html
-<img src="http://yourserver:5000/radar_stream?elev=0.9" alt="Radar 0.9° tilt">
-```
-
----
-
-## How It Works
-
-1. **Polling** the NOAA Level-II bucket under `YYYY/MM/DD/SITE/` to find the newest `*_V06` file.
-2. **Downloading** the file and detecting if it’s gzipped (via magic bytes); decompressing if needed.
-3. **Reading** the Level-II volume with Py-ART (auto-detect, fallback to `read_nexrad_archive`).
-4. **Selecting** the sweep index closest to the requested elevation.
-5. **Rendering** a PPI plot with Matplotlib (`Agg` backend), adding the North arrow and title.
-6. **Streaming** each frame as `multipart/x-mixed-replace` MJPEG—browsers show it as a live-updating image.
-
----
-
-## Customization
-
-* **Site**: change the `SITE` constant (e.g. `KTLX`, `KDFX`).
-* **Timezone**: modify `LOCAL_TZ` to your preferred zone.
-* **Resolution**: adjust `FIG_SIZE` and `FIG_DPI` for higher/lower output.
-* **Poll interval**: tune `POLL_INTERVAL` for quicker or slower S3 checks.
-
----
-
-## License
-
-MIT © John Bradley
->>>>>>> 051dd2d8bf358609f3465520ba5e83c4721ff501
+- **NOAA**: For providing free access to NEXRAD radar data
+- **PyART Community**: For excellent radar data processing tools
+- **Leaflet.js**: For powerful mapping capabilities
+- **scikit-learn**: For robust clustering algorithms
